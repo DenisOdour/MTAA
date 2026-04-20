@@ -12,31 +12,60 @@ const app = express();
 const server = http.createServer(app);
 
 // ─── CORS Config ──────────────────────────────────────────────────
+// Build list of allowed origins from env + known patterns
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:3001',
+  'http://localhost:5000',
   process.env.FRONTEND_URL,
-  process.env.FRONTEND_URL_PROD
+  process.env.FRONTEND_URL_PROD,
 ].filter(Boolean);
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
+    // Allow requests with no origin (Postman, mobile apps, server-to-server)
     if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin) || process.env.NODE_ENV === 'development') {
-      return callback(null, true);
-    }
-    callback(new Error('Not allowed by CORS'));
+
+    // Allow exact matches
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+
+    // Allow ANY vercel.app subdomain (covers preview deploys too)
+    if (origin.endsWith('.vercel.app')) return callback(null, true);
+
+    // Allow ANY render.com subdomain
+    if (origin.endsWith('.onrender.com')) return callback(null, true);
+
+    // Allow localhost on any port during development
+    if (/^http:\/\/localhost:\d+$/.test(origin)) return callback(null, true);
+    if (/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) return callback(null, true);
+
+    // Block everything else
+    console.warn('CORS blocked origin:', origin);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  optionsSuccessStatus: 200 // Some browsers (IE11) choke on 204
+};
+
+// ⚠️  Handle preflight OPTIONS requests FIRST — before any other middleware
+app.options('*', cors(corsOptions));
+
+// Apply CORS to all routes
+app.use(cors(corsOptions));
 
 // ─── Socket.io ────────────────────────────────────────────────────
 const io = socketio(server, {
   cors: {
-    origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*',
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      if (origin.endsWith('.vercel.app')) return callback(null, true);
+      if (origin.endsWith('.onrender.com')) return callback(null, true);
+      if (/^http:\/\/localhost:\d+$/.test(origin)) return callback(null, true);
+      callback(null, true); // Socket.io: be more permissive for now
+    },
     methods: ['GET', 'POST'],
     credentials: true
   }
@@ -44,7 +73,12 @@ const io = socketio(server, {
 app.set('io', io);
 
 // ─── Security & Parsing ───────────────────────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: false, crossOriginOpenerPolicy: false }));
+// Disable helmet's cross-origin restrictions since we handle CORS manually
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  crossOriginOpenerPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 if (process.env.NODE_ENV !== 'test') app.use(morgan('dev'));
